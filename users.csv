@@ -1,0 +1,31 @@
+user_id,username,role,permissions
+U001,arun,admin,Manage users; Run AI; View results
+U002,priya,researcher,Run AI; View results
+U003,rahul,viewer,View results
+U004,sneha,researcher,Run AI; View results
+U005,amit,viewer,View results
+U006,kavya,admin,Manage users; Run AI; View results
+U007,rohan,researcher,Run AI; View results
+U008,meera,viewer,View results
+U009,vikram,researcher,Run AI; View results
+U010,isha,viewer,View results
+U011,dev,researcher,Run AI; View results
+U012,nisha,viewer,View results
+U013,karan,admin,Manage users; Run AI; View results
+U014,ananya,researcher,Run AI; View results
+U015,manav,viewer,View results
+U016,riya,researcher,Run AI; View results
+U017,aditya,viewer,View results
+U018,tanvi,researcher,Run AI; View results
+U019,ishan,viewer,View results
+U020,diya,researcher,Run AI; View results
+U021,neel,viewer,View results
+U022,sana,admin,Manage users; Run AI; View results
+U023,yash,researcher,Run AI; View results
+U024,pari,viewer,View results
+U025,om,researcher,Run AI; View results
+U026,zoya,viewer,View results
+U027,arjun,researcher,Run AI; View results
+U028,mira,viewer,View results
+U029,kabir,researcher,Run AI; View results
+U030,tara,viewer,View results
