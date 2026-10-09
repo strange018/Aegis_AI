@@ -8,6 +8,7 @@ deterministic AI research features.
 
 import os
 import json
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -63,6 +64,15 @@ st.set_page_config(
 # Initialize Database Schema & Streamlit Session
 init_db(DEFAULT_DB_PATH)
 init_session()
+
+# Auto-seed admin and dataset on clean start (essential for zero-configuration cloud deployment)
+if count_users(DEFAULT_DB_PATH) == 0:
+    admin_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+    insert_user("ADMIN001", DEFAULT_ADMIN_USERNAME, admin_hash, Role.ADMIN.value, 1, db_path=DEFAULT_DB_PATH)
+    csv_file = Path(__file__).resolve().parent / "users.csv"
+    if csv_file.exists():
+        import_users_from_csv(str(csv_file), default_password=DEFAULT_USER_PASSWORD, db_path=DEFAULT_DB_PATH)
+
 
 # ==========================================
 # Luxury Nodal-Inspired Theme & Design Tokens
