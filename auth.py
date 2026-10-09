@@ -18,9 +18,13 @@ from database import (
     update_user_password,
     get_all_users,
     count_users,
+    get_known_ips,
+    insert_login_record,
 )
 from permissions import Role, Permission, has_permission, get_role_permissions
 from audit import log_event, AuditEvent
+from network import get_client_ip
+import config
 
 
 # ==========================================
@@ -53,14 +57,22 @@ def verify_password(stored_hash: str, plain_password: str) -> bool:
 def authenticate_user(
     username: str,
     password: str,
-    ip_address: str = "127.0.0.1",
-    db_path: Optional[str] = None
+    ip_address: Optional[str] = None,
+    db_path: Optional[str] = None,
+    detect_new_ip: Optional[bool] = None
 ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
     """
     Authenticates a user against SQLite credentials.
     Enforces active account status and logs all successful and failed attempts.
+    Every successful login stores the client IP in `login_history`; a login from an IP
+    the user has never used before is allowed but flagged (NEW_IP_LOGIN alert).
     Returns: (is_authenticated, user_dict_without_hash, error_message)
     """
+    if not ip_address:
+        ip_address = get_client_ip()
+    if detect_new_ip is None:
+        detect_new_ip = config.IP_ANOMALY_DETECTION
+
     clean_username = username.strip().lower() if username else ""
     if not clean_username or not password:
         return False, None, "Please provide both username and password."
@@ -115,6 +127,9 @@ def authenticate_user(
         db_path=db_path
     )
 
+    # Login IP check: compare against every IP this user has logged in from before
+    ip_alert = check_login_ip(user, ip_address, detect_new_ip=detect_new_ip, db_path=db_path)
+
     # Return safe user dictionary (without password_hash)
     safe_user = {
         "user_id": user["user_id"],
@@ -122,9 +137,68 @@ def authenticate_user(
         "role": user["role"],
         "is_active": bool(user["is_active"]),
         "created_at": user["created_at"],
-        "permissions": list(get_role_permissions(user["role"]))
+        "permissions": list(get_role_permissions(user["role"])),
+        "login_ip": ip_address,
+        "ip_alert": ip_alert
     }
     return True, safe_user, None
+
+
+def check_login_ip(
+    user: Dict[str, Any],
+    ip_address: str,
+    detect_new_ip: bool = True,
+    db_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Records the login IP and decides whether it is anomalous.
+
+    - First ever login: the IP is registered as the user's known IP (LOGIN_IP_REGISTERED).
+    - Login from an already known IP: recorded, no alert.
+    - Login from a new IP: recorded, allowed, and flagged with a NEW_IP_LOGIN alert.
+
+    Returns an alert dict for a flagged login, otherwise None.
+    """
+    known_ips = get_known_ips(user["user_id"], db_path=db_path)
+    is_first_login = not known_ips
+    is_new_ip = detect_new_ip and not is_first_login and ip_address not in known_ips
+
+    insert_login_record(
+        user_id=user["user_id"],
+        username=user["username"],
+        role=user["role"],
+        ip_address=ip_address,
+        is_new_ip=is_new_ip,
+        known_ips=known_ips,
+        db_path=db_path
+    )
+
+    if is_first_login:
+        log_event(
+            AuditEvent.LOGIN_IP_REGISTERED,
+            f"First login of '{user['username']}' recorded from IP {ip_address}; registered as known IP",
+            user_id=user["user_id"],
+            username=user["username"],
+            status="SUCCESS",
+            ip_address=ip_address,
+            db_path=db_path
+        )
+        return None
+
+    if not is_new_ip:
+        return None
+
+    log_event(
+        AuditEvent.NEW_IP_LOGIN,
+        f"ALERT: '{user['username']}' (role '{user['role']}') logged in from new IP {ip_address}. "
+        f"Previously known IPs: {', '.join(known_ips)}",
+        user_id=user["user_id"],
+        username=user["username"],
+        status="ALERT",
+        ip_address=ip_address,
+        db_path=db_path
+    )
+    return {"new_ip": ip_address, "known_ips": known_ips}
 
 
 # ==========================================
@@ -340,7 +414,8 @@ def logout_session() -> None:
             f"User '{user.get('username')}' logged out",
             user_id=user.get("user_id"),
             username=user.get("username"),
-            status="SUCCESS"
+            status="SUCCESS",
+            ip_address=user.get("login_ip")
         )
     st.session_state.authenticated = False
     st.session_state.user = None

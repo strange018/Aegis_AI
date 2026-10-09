@@ -22,6 +22,13 @@ Every module and user role is granted the minimum levels of access—and only th
 ### Audit Logging & Non-Repudiation
 All critical security events (login success/failure, user creation, role modification, account deactivation, and unauthorized privilege escalation attempts) are immutably logged to the SQLite database with timestamps, actor IDs, event types, and sanitized descriptions.
 
+### Login IP Monitoring (Data Security & Privacy)
+Every successful sign-in, by an admin or by any user imported from `users.csv`, stores the client's IP address in the SQLite `login_history` table:
+- **First sign-in:** the IP is registered as the user's known IP (`LOGIN_IP_REGISTERED`).
+- **Same IP again:** the sign-in is recorded, with no alert.
+- **Different IP:** the sign-in is **allowed but flagged**. A `NEW_IP_LOGIN` event (status `ALERT`) is written to the audit log and to the plain-text `security.log` file, a warning is shown to the user, and a red alert appears on the admin dashboard (**🌐 Login IP Security** tab).
+- Set `IP_ANOMALY_DETECTION=false` in `.env` to keep recording IPs without raising alerts.
+
 ---
 
 ## 2. Project Directory Structure
@@ -37,6 +44,7 @@ AI_Devansh/
 ├── import_users.py         # CSV inspection, validation, idempotent loading & report generation
 ├── ai_service.py           # Protected deterministic AI text analytics & PII scan pipeline
 ├── config.py               # Application configuration & environment loader
+├── network.py              # Resolves the client IP address of a Streamlit session
 │
 ├── users.csv               # Provided dataset with 30 user records
 ├── requirements.txt        # Python dependency manifest
@@ -49,6 +57,7 @@ AI_Devansh/
     ├── test_permissions.py # RBAC policy & least privilege tests
     ├── test_import.py      # CSV validation, idempotency & error handling tests
     ├── test_audit.py       # Security audit logging & redaction tests
+    ├── test_ip_security.py # Login IP tracking & new-IP alert tests
     └── test_ai_service.py  # Simulated AI execution & authorization barrier tests
 ```
 
@@ -147,6 +156,15 @@ streamlit run app.py
 
 The application will be accessible at:
 - **Local URL:** `http://localhost:8501`
+
+### Multi-laptop demo of new-IP alerts (same Wi-Fi)
+On the host laptop:
+```bash
+streamlit run app.py --server.address 0.0.0.0
+```
+Then on the other laptops, open `http://<host-LAN-IP>:8501` (find the host IP with `ipconfig`). Allow Python through the Windows firewall if it asks. Each laptop has its own LAN IP, so signing in as the same user from a second laptop raises a `NEW_IP_LOGIN` alert.
+
+> Several monitors or browser tabs on **one** laptop share one IP and will not trigger an alert. When the app is deployed to the cloud, laptops behind the same router share one public IP; put one laptop on a phone hotspot to show a different IP.
 
 ---
 

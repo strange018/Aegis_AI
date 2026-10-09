@@ -29,6 +29,8 @@ from database import (
     count_users,
     get_user_by_username,
     insert_user,
+    get_login_history,
+    get_user_ip_summary,
 )
 from permissions import Role, Permission, has_permission, get_role_permissions, ROLE_DESCRIPTIONS
 from auth import (
@@ -46,7 +48,8 @@ from auth import (
 )
 from import_users import import_users_from_csv
 from ai_service import execute_ai_research_task
-from audit import log_event, AuditEvent
+from audit import log_event, AuditEvent, get_security_log_path
+from network import get_client_ip
 
 
 # Page Configuration
@@ -337,6 +340,9 @@ def render_sidebar():
         st.sidebar.write(f"**Username:** `{user['username']}`")
         st.sidebar.write(f"**User ID:** `{user['user_id']}`")
         st.sidebar.write(f"**Assigned Role:** {role_color}")
+        st.sidebar.write(f"**Login IP:** `{user.get('login_ip', 'unknown')}`")
+        if user.get("ip_alert"):
+            st.sidebar.error("⚠️ Signed in from a new IP address")
         
         with st.sidebar.expander("🔑 Granted Permissions"):
             for p in user.get("permissions", []):
@@ -503,7 +509,7 @@ def render_login_view():
         )
         logs = get_audit_logs(limit=15, db_path=DEFAULT_DB_PATH)
         if logs:
-            st.dataframe(pd.DataFrame(logs)[["id", "username", "event_type", "status", "timestamp"]], use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(logs)[["id", "username", "event_type", "status", "ip_address", "timestamp"]], use_container_width=True, hide_index=True)
         else:
             st.info("No audit logs recorded yet. Sign in to generate audit events.")
         return
@@ -552,13 +558,16 @@ def render_login_view():
 
     with col1:
         st.markdown("### 🔐 User Authentication")
+        client_ip = get_client_ip()
+        st.caption(f"🌐 Your IP address: `{client_ip}` — every sign-in is recorded with its IP. "
+                   "Sign-ins from a new IP are flagged to administrators.")
         with st.form("login_form"):
             username = st.text_input("Username", placeholder="e.g., admin, priya, rahul")
             password = st.text_input("Password", type="password", placeholder="Enter password")
             submit = st.form_submit_button("Sign In →", use_container_width=True, type="primary")
 
             if submit:
-                success, user_dict, err = authenticate_user(username, password, db_path=DEFAULT_DB_PATH)
+                success, user_dict, err = authenticate_user(username, password, ip_address=client_ip, db_path=DEFAULT_DB_PATH)
                 if success:
                     login_session(user_dict)
                     st.success(f"Welcome back, {user_dict['username']} ({user_dict['role'].upper()})!")
@@ -652,11 +661,22 @@ def render_admin_dashboard(user: dict):
         unsafe_allow_html=True
     )
 
+    recent_alerts = get_login_history(limit=5, only_new_ip=True, db_path=DEFAULT_DB_PATH)
+    if recent_alerts:
+        latest = recent_alerts[0]
+        st.error(
+            f"🚨 **New-IP login alert:** `{latest['username']}` ({latest['role']}) signed in from "
+            f"**{latest['ip_address']}** at {latest['timestamp'][:19].replace('T', ' ')} UTC "
+            f"(known IPs: {latest['known_ips'] or 'none'}). "
+            f"See the **🌐 Login IP Security** tab for all alerts."
+        )
+
     tabs = st.tabs([
         "📊 System Overview",
         "👥 User Management",
         "📥 CSV Importer",
         "📜 Audit Logs",
+        "🌐 Login IP Security",
         "🧪 AI Workspace",
         "🛡️ RBAC Security Tester"
     ])
@@ -665,11 +685,12 @@ def render_admin_dashboard(user: dict):
     with tabs[0]:
         st.subheader("Platform Metrics")
         metrics = get_system_metrics(DEFAULT_DB_PATH)
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Total Users", metrics["total_users"])
         c2.metric("Active Accounts", metrics["active_users"])
         c3.metric("Audit Events Logged", metrics["total_audit_events"])
         c4.metric("Failed Login Attempts", metrics["failed_logins"])
+        c5.metric("New-IP Login Alerts", metrics["new_ip_alerts"])
 
         st.markdown("---")
         st.subheader("Role Distribution")
@@ -872,13 +893,70 @@ def render_admin_dashboard(user: dict):
         else:
             st.info("No audit logs matched your query.")
 
-    # --- TAB 5: AI Workspace ---
+    # --- TAB 5: Login IP Security ---
     with tabs[4]:
+        render_login_ip_security()
+
+    # --- TAB 6: AI Workspace ---
+    with tabs[5]:
         render_ai_workspace(user)
 
-    # --- TAB 6: Security Sandbox ---
-    with tabs[5]:
+    # --- TAB 7: Security Sandbox ---
+    with tabs[6]:
         render_security_tester(user)
+
+
+def render_login_ip_security():
+    st.subheader("🌐 Login IP Monitoring & New-IP Alerts")
+    st.caption(
+        "Every successful sign-in is stored in the SQLite `login_history` table with its IP address. "
+        "A user's first IP is registered as known; a later sign-in from a different IP is allowed "
+        "but flagged as a NEW_IP_LOGIN alert."
+    )
+
+    alerts = get_login_history(limit=200, only_new_ip=True, db_path=DEFAULT_DB_PATH)
+    st.markdown(f"#### 🚨 Flagged Sign-ins ({len(alerts)})")
+    if alerts:
+        df_alerts = pd.DataFrame(alerts)[["timestamp", "username", "role", "ip_address", "known_ips"]]
+        df_alerts.columns = ["Time (UTC)", "Username", "Role", "New IP", "Previously Known IPs"]
+        st.dataframe(df_alerts, use_container_width=True, hide_index=True)
+    else:
+        st.success("No sign-ins from unrecognized IP addresses so far.")
+
+    st.markdown("#### 👤 Known IPs per User")
+    summary = get_user_ip_summary(db_path=DEFAULT_DB_PATH)
+    if summary:
+        df_sum = pd.DataFrame(summary)[["username", "role", "total_logins", "distinct_ips", "new_ip_alerts", "ip_addresses", "last_login"]]
+        st.dataframe(df_sum, use_container_width=True, hide_index=True)
+    else:
+        st.info("No sign-ins recorded yet.")
+
+    st.markdown("#### 📒 Full Login History")
+    history = get_login_history(limit=500, db_path=DEFAULT_DB_PATH)
+    if history:
+        df_hist = pd.DataFrame(history)
+        df_hist["flag"] = df_hist["is_new_ip"].map({1: "🚨 NEW IP", 0: "✅ known"})
+        st.dataframe(df_hist[["id", "timestamp", "username", "role", "ip_address", "flag"]], use_container_width=True, hide_index=True)
+        st.download_button(
+            "📥 Export Login History as CSV",
+            data=df_hist.to_csv(index=False).encode("utf-8"),
+            file_name=f"login_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+    log_path = get_security_log_path(DEFAULT_DB_PATH)
+    st.markdown("#### 📄 Security Log File")
+    if log_path.exists():
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        st.code("\n".join(lines[-30:]) or "(empty)", language="text")
+        st.download_button(
+            f"📥 Download {log_path.name}",
+            data="\n".join(lines).encode("utf-8"),
+            file_name=log_path.name,
+            mime="text/plain"
+        )
+    else:
+        st.info(f"`{log_path.name}` will be created on the first security event.")
 
 
 # ==========================================
@@ -1146,6 +1224,13 @@ def main():
     if not user:
         render_login_view()
     else:
+        alert = user.get("ip_alert")
+        if alert:
+            st.warning(
+                f"⚠️ **Sign-in from a new IP address detected.** This session comes from "
+                f"`{alert['new_ip']}`, which differs from your known IP(s): `{', '.join(alert['known_ips'])}`. "
+                f"The sign-in was allowed, but it has been recorded and reported to administrators."
+            )
         role = user.get("role", "").lower()
         if role == Role.ADMIN.value:
             render_admin_dashboard(user)

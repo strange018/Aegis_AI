@@ -87,6 +87,24 @@ def init_db(db_path: Optional[str] = None) -> None:
             );
         """)
 
+        # 4. Login History Table (IP address of every successful login)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS login_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                is_new_ip INTEGER NOT NULL DEFAULT 0 CHECK (is_new_ip IN (0, 1)),
+                known_ips TEXT NOT NULL DEFAULT '',
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_user ON login_history(user_id);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_new_ip ON login_history(is_new_ip);")
+
         conn.commit()
 
 
@@ -303,6 +321,85 @@ def get_ai_experiments(limit: int = 50, user_id: Optional[str] = None, db_path: 
 
 
 # ==========================================
+# Login History / IP Tracking Functions
+# ==========================================
+
+def get_known_ips(user_id: str, db_path: Optional[str] = None) -> List[str]:
+    """Return the distinct IP addresses a user has previously logged in from (oldest first)."""
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ip_address FROM login_history WHERE user_id = ?
+            GROUP BY ip_address ORDER BY MIN(id) ASC
+        """, (user_id,))
+        return [r["ip_address"] for r in cursor.fetchall()]
+
+
+def insert_login_record(
+    user_id: str,
+    username: str,
+    role: str,
+    ip_address: str,
+    is_new_ip: bool,
+    known_ips: List[str],
+    db_path: Optional[str] = None
+) -> int:
+    """Store the IP address of a successful login."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO login_history (user_id, username, role, ip_address, is_new_ip, known_ips, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, username, role, ip_address, 1 if is_new_ip else 0, ", ".join(known_ips), now_iso))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_login_history(
+    limit: int = 100,
+    only_new_ip: bool = False,
+    user_id: Optional[str] = None,
+    db_path: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Retrieve login records, newest first. `only_new_ip` returns just the flagged ones."""
+    query = "SELECT * FROM login_history WHERE 1=1"
+    params: List[Any] = []
+
+    if only_new_ip:
+        query += " AND is_new_ip = 1"
+    if user_id:
+        query += " AND user_id = ?"
+        params.append(user_id)
+
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, tuple(params))
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def get_user_ip_summary(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Per-user summary of logins: number of logins, distinct IPs and flagged logins."""
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, username, role,
+                   COUNT(*) AS total_logins,
+                   COUNT(DISTINCT ip_address) AS distinct_ips,
+                   SUM(is_new_ip) AS new_ip_alerts,
+                   GROUP_CONCAT(DISTINCT ip_address) AS ip_addresses,
+                   MAX(timestamp) AS last_login
+            FROM login_history
+            GROUP BY user_id
+            ORDER BY last_login DESC
+        """)
+        return [dict(r) for r in cursor.fetchall()]
+
+
+# ==========================================
 # System Metrics
 # ==========================================
 
@@ -329,6 +426,9 @@ def get_system_metrics(db_path: Optional[str] = None) -> Dict[str, Any]:
         cursor.execute("SELECT COUNT(*) FROM ai_experiments")
         total_ai_runs = cursor.fetchone()[0]
 
+        cursor.execute("SELECT COUNT(*) FROM login_history WHERE is_new_ip = 1")
+        new_ip_alerts = cursor.fetchone()[0]
+
         return {
             "total_users": total_users,
             "active_users": active_users,
@@ -336,5 +436,6 @@ def get_system_metrics(db_path: Optional[str] = None) -> Dict[str, Any]:
             "role_counts": role_counts,
             "total_audit_events": total_audit_events,
             "failed_logins": failed_logins,
-            "total_ai_runs": total_ai_runs
+            "total_ai_runs": total_ai_runs,
+            "new_ip_alerts": new_ip_alerts
         }

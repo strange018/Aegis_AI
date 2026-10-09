@@ -19,5 +19,8 @@ env/
 .coverage
 htmlcov/
 
+# Security log files
+*.log
+
 # Temporary uploads
 temp_*.csv

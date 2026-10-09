@@ -1,0 +1,258 @@
+=====================================================================
+  AEGIS AI PLATFORM - COMPARISON OF SECURITY MODELS
+  Authentication, Authorization and Administration:
+  the model used in this project vs other mathematical models
+=====================================================================
+
+0. WHAT THIS PROJECT CURRENTLY USES
+---------------------------------------------------------------------
+Authentication : Salted, slow password hashing (Werkzeug scrypt/pbkdf2)
+                 + IP-address anomaly flagging (login IP stored in SQLite)
+Authorization  : Role-Based Access Control (RBAC, NIST Core RBAC)
+Administration : Central admin role manages users, roles and status
+Accountability : Append-only audit log (SQLite) with redaction
+
+Mathematical form of RBAC (NIST, Sandhu et al. 1996):
+    U  = set of users          R  = set of roles
+    P  = set of permissions    S  = set of sessions
+    UA is a subset of U x R    (user -> role assignment)
+    PA is a subset of P x R    (permission -> role assignment)
+
+    Access(u, p) = TRUE  iff  there exists r in R such that
+                              (u, r) in UA  AND  (p, r) in PA
+
+In this project:
+    admin      -> {Manage users, Run AI, View results}
+    researcher -> {Run AI, View results}
+    viewer     -> {View results}
+These permission sets are strictly nested (viewer is a subset of
+researcher, which is a subset of admin), so the roles form a simple
+role hierarchy (a total order).
+
+
+=====================================================================
+PART A - AUTHORIZATION MODELS ("What are you allowed to do?")
+=====================================================================
+
+A1. Access Control Matrix (Lampson, 1971) - foundation of DAC
+---------------------------------------------------------------------
+Model : A matrix M[s, o] with subjects s as rows and objects o as
+        columns. Each cell holds rights such as {read, write, execute}.
+        Access(s, o, a) = TRUE iff a is in M[s, o]
+Variants:
+   - ACL (Access Control List): store each COLUMN with the object
+   - Capability list:           store each ROW with the subject
+Pros  : Very fine-grained; easy to understand.
+Cons  : Size is |S| x |O|, so it does not scale; the owner hands out
+        rights at their own discretion (DAC), so rights can leak.
+vs RBAC: RBAC compresses the matrix by grouping users into roles, so
+        30 users x N objects becomes 3 roles x N objects.
+
+A2. Harrison-Ruzzo-Ullman (HRU) model, 1976
+---------------------------------------------------------------------
+Model : An access matrix plus commands that change it
+        (enter/delete right, create/destroy subject/object).
+Key result: The "safety question" (can a given right ever leak to
+        a subject?) is UNDECIDABLE in general - it reduces to the
+        Halting Problem.
+Lesson: Fully general discretionary systems cannot be proven safe.
+        This is why restricted models such as RBAC are preferred.
+
+A3. Take-Grant model (Jones, Lipton, Snyder 1976)
+---------------------------------------------------------------------
+Model : A directed graph. Nodes are subjects/objects; edges are
+        labelled with rights {t (take), g (grant), r, w}.
+        Rewriting rules: take, grant, create, remove.
+Key result: The safety question is decidable in LINEAR time
+        (unlike HRU).
+Use   : Analysing how rights can propagate between accounts.
+
+A4. Bell-LaPadula (BLP) - Confidentiality (Mandatory Access Control)
+---------------------------------------------------------------------
+Model : Each subject and object gets a security level from a
+        LATTICE (L, <=), e.g. Public < Internal < Confidential < Secret.
+        Simple Security Property ("no read up"):
+              s can read o   only if  level(o) <= level(s)
+        *-Property ("no write down"):
+              s can write o  only if  level(s) <= level(o)
+Pros  : Mathematically proven to prevent information leaking
+        downwards (Basic Security Theorem).
+Cons  : Rigid; only covers confidentiality, not integrity.
+        Admins cannot "share down" without a trusted subject.
+Fit for this project: Could label AI results as Public/Internal and
+        users as viewer=Public, researcher=Internal, admin=Secret.
+
+A5. Biba model (1977) - Integrity (dual of BLP)
+---------------------------------------------------------------------
+Model : Integrity levels on a lattice.
+        "No read down":  s reads o  only if  i(s) <= i(o)
+        "No write up":   s writes o only if  i(o) <= i(s)
+Purpose: Stops low-trust data from corrupting high-trust data.
+Fit   : Untrusted CSV imports should not overwrite admin-verified
+        user records unless validated (this project already validates
+        users.csv, which is an informal Biba-style check).
+
+A6. Clark-Wilson model (1987) - Commercial integrity
+---------------------------------------------------------------------
+Model : CDIs (constrained data items), UDIs (unconstrained data),
+        TPs (transformation procedures), IVPs (integrity verification
+        procedures). Access triples (user, TP, CDI) plus
+        SEPARATION OF DUTY.
+Pros  : Matches real business rules (e.g. no one person can both
+        create and approve a user).
+Cons  : Heavier to implement; needs certified TPs.
+
+A7. Brewer-Nash / Chinese Wall model (1989)
+---------------------------------------------------------------------
+Model : Objects are grouped into "conflict-of-interest classes".
+        Once a user reads data of company A, they are blocked from
+        company B in the same class. Access depends on HISTORY.
+Use   : Consulting/finance. Could stop one researcher from seeing
+        experiments of two competing clients.
+
+A8. Attribute-Based Access Control (ABAC, NIST SP 800-162)
+---------------------------------------------------------------------
+Model : Access = f(subject attributes, object attributes,
+                    action, environment attributes)
+        where f is a Boolean policy, e.g.
+        ALLOW if role = "researcher" AND dept(obj) = dept(user)
+                 AND time in 09:00-18:00 AND ip in trusted_subnet
+Pros  : Very expressive; context-aware. The IP-based login check
+        in this project is effectively an ABAC "environment
+        attribute".
+Cons  : Policies are harder to audit; rule explosion; slower to
+        evaluate than a role lookup.
+
+A9. Relationship-Based Access Control (ReBAC / Google Zanzibar)
+---------------------------------------------------------------------
+Model : Access is a path query on a graph of relations,
+        e.g. user --member--> team --owner--> document.
+Pros  : Natural for sharing (Google Drive, GitHub).
+Cons  : Needs a graph store; overkill for 3 fixed roles.
+
+
+=====================================================================
+PART B - AUTHENTICATION MODELS ("Who are you?")
+=====================================================================
+
+B1. Salted slow password hashing  (CURRENT)
+---------------------------------------------------------------------
+Math  : stored = H(salt || password), where H is a deliberately slow
+        KDF (scrypt is memory-hard; pbkdf2 iterates HMAC-SHA256 many
+        times).
+Security: An attacker must brute-force each password separately;
+        the salt defeats rainbow tables.
+Weakness: Single factor - a stolen or reused password is enough.
+
+B2. HOTP / TOTP one-time passwords (RFC 4226 / RFC 6238)
+---------------------------------------------------------------------
+Math  : HOTP(K, C) = Truncate(HMAC-SHA1(K, C)) mod 10^6
+        TOTP(K)    = HOTP(K, floor((now - T0) / 30))
+Use   : Google Authenticator style second factor.
+Benefit: A stolen password alone is no longer enough.
+
+B3. Lamport hash chain (S/KEY, 1981)
+---------------------------------------------------------------------
+Math  : Server stores h^n(seed). Login i sends h^(n-i)(seed); the
+        server checks h(received) == stored, then replaces stored.
+Benefit: Each password is used once; an eavesdropper cannot reuse it
+        because h is one-way.
+
+B4. Challenge-response (HMAC based)
+---------------------------------------------------------------------
+Math  : Server sends random nonce N; client returns HMAC(K, N).
+Benefit: The secret never travels over the network; replay fails
+        because N changes every time.
+
+B5. Password-Authenticated Key Exchange (SRP, OPAQUE)
+---------------------------------------------------------------------
+Math  : Based on discrete logarithms. The server stores only a
+        verifier v = g^x mod N (x derived from salt and password).
+Benefit: The server never sees the password, even at login, and a
+        database leak does not reveal the password directly.
+
+B6. Zero-Knowledge Proof - Schnorr identification
+---------------------------------------------------------------------
+Math  : Public key y = g^x mod p (x is secret).
+        Prover sends t = g^r, verifier sends challenge c,
+        prover sends s = r + c*x mod q.
+        Verifier checks g^s == t * y^c (mod p).
+Benefit: Proves knowledge of x without revealing ANYTHING about x.
+
+B7. Public-key / WebAuthn (FIDO2 passkeys)
+---------------------------------------------------------------------
+Math  : Digital signatures (ECDSA / Ed25519) over a server challenge.
+Benefit: Phishing-resistant; there is no shared secret to steal.
+
+B8. Kerberos (symmetric tickets, Needham-Schroeder based)
+---------------------------------------------------------------------
+Math  : A trusted KDC issues encrypted, time-limited tickets
+        {session_key, identity, expiry}_K.
+Benefit: Single sign-on across many services.
+Cons  : Needs a central KDC and clock synchronisation.
+
+B9. Risk-based / adaptive authentication (probabilistic)
+---------------------------------------------------------------------
+Math  : risk score R = sum over i of (w_i * f_i), with features such
+        as new IP, new device, impossible travel (distance / time),
+        odd hour, and failed attempts. A Bayesian version is
+        P(attack | features) = P(features | attack) P(attack) / P(features).
+        Policy: R < t1 allow; t1 <= R < t2 allow + alert/step-up;
+        R >= t2 block.
+Relation to this project: The new IP check is a simple 1-feature
+        risk model (f = 1 if IP differs from the stored login IP),
+        with the "allow + flag with alert" policy.
+
+
+=====================================================================
+PART C - SUMMARY COMPARISON TABLE
+=====================================================================
+
+Authorization models
+---------------------------------------------------------------------
+Model          | Basis         | Granularity | Scales | Admin effort | Fit here
+---------------+---------------+-------------+--------+--------------+---------
+Access Matrix  | matrix        | very fine   | poor   | high         | low
+HRU            | matrix + cmds | very fine   | poor   | high         | theory
+Take-Grant     | graph         | fine        | medium | medium       | theory
+Bell-LaPadula  | lattice       | coarse      | good   | low          | medium
+Biba           | lattice       | coarse      | good   | low          | medium
+Clark-Wilson   | triples + SoD | medium      | medium | high         | medium
+Chinese Wall   | history sets  | medium      | medium | medium       | low
+RBAC (CURRENT) | sets/relations| medium      | good   | low          | HIGH
+ABAC           | Boolean logic | very fine   | good   | high         | high
+ReBAC          | graph paths   | fine        | v.good | medium       | low
+
+Authentication models
+---------------------------------------------------------------------
+Model               | Hard problem        | Factors | Phish-proof | Effort
+--------------------+---------------------+---------+-------------+-------
+Salted hash (CURR.) | preimage resistance | 1       | no          | low
+TOTP/HOTP           | HMAC security       | 2       | no          | low
+Lamport chain       | one-way function    | 1 (OTP) | partly      | medium
+Challenge-response  | HMAC security       | 1       | partly      | medium
+SRP / OPAQUE        | discrete log        | 1       | partly      | high
+Schnorr ZKP         | discrete log        | 1       | partly      | high
+WebAuthn / FIDO2    | ECDLP signatures    | 1-2     | YES         | medium
+Kerberos            | symmetric crypto    | 1       | partly      | high
+Risk-based (IP)     | statistics          | context | no          | low
+
+
+=====================================================================
+PART D - WHY RBAC + HASHING WAS CHOSEN, AND HOW TO EXTEND IT
+=====================================================================
+1. RBAC matches the data: users.csv already gives every user exactly
+   one role, and permissions depend only on the role.
+2. RBAC directly enforces the Principle of Least Privilege, is easy
+   to audit (3 roles instead of 30 user rules), and is the NIST
+   standard model.
+3. Salted slow hashing is the minimum industry standard for stored
+   passwords and needs no extra hardware or apps.
+
+Natural next steps (in order of value vs effort):
+   a) Add TOTP as a second factor for the admin role (B2).
+   b) Grow the IP check into a full risk score (B9 / A8 hybrid:
+      "RBAC + ABAC environment conditions").
+   c) Add separation of duty for admin actions (Clark-Wilson, A6).
+   d) Use passkeys / WebAuthn for phishing-resistant login (B7).
+=====================================================================
